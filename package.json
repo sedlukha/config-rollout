@@ -1,0 +1,50 @@
+{
+  "name": "config-rollout",
+  "version": "0.1.0",
+  "description": "Commit and push vendored config files across sibling git repos — the commit+push half of a file-vendoring sync.",
+  "keywords": [
+    "monorepo",
+    "multi-repo",
+    "vendor",
+    "sync",
+    "git",
+    "rollout",
+    "commit",
+    "push",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Artur Sedlukha",
+  "homepage": "https://github.com/sedlukha/config-rollout#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sedlukha/config-rollout.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sedlukha/config-rollout/issues"
+  },
+  "type": "module",
+  "bin": {
+    "config-rollout": "bin/config-rollout.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc",
+    "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
