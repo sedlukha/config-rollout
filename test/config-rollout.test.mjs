@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +57,39 @@ function repoWithRemote(/** @type {string} */ dir, /** @type {string} */ remotes
   git(dir, 'push', '-q', '-u', 'origin', 'master')
   return { dir, bare }
 }
+
+/**
+ * Land a commit on the bare remote from a throwaway clone, so the sibling repo
+ * falls behind and its next push is rejected as non-fast-forward.
+ * @param {string} bare @param {string} rel @param {string} body
+ * @param {{ viaMerge?: boolean }} [o] viaMerge: land it through a merge commit,
+ *   which is what makes a later rebase replay across a merge.
+ */
+function advanceRemote(bare, rel, body, o = {}) {
+  const tmp = mkdtempSync(join(tmpdir(), 'cr-adv-'))
+  git(tmp, 'clone', '-q', bare, '.')
+  git(tmp, 'config', 'user.email', 't@example.com')
+  git(tmp, 'config', 'user.name', 'Test')
+  git(tmp, 'config', 'commit.gpgsign', 'false')
+  if (o.viaMerge) {
+    git(tmp, 'checkout', '-q', '-b', 'side')
+    write(tmp, rel, body)
+    git(tmp, 'add', '-A')
+    git(tmp, 'commit', '-q', '-m', `side: ${rel}`)
+    git(tmp, 'checkout', '-q', 'master')
+    git(tmp, 'merge', '-q', '--no-ff', '-m', `merge side`, 'side')
+  } else {
+    write(tmp, rel, body)
+    git(tmp, 'add', '-A')
+    git(tmp, 'commit', '-q', '-m', `remote: ${rel}`)
+  }
+  git(tmp, 'push', '-q', 'origin', 'HEAD:master')
+  return tmp
+}
+
+/** Number of parents of HEAD — 2 means a merge commit. */
+const parentCount = (/** @type {string} */ dir) =>
+  git(dir, 'rev-list', '--parents', '-n', '1', 'HEAD').trim().split(/\s+/).length - 1
 
 /** @param {string} hub @param {string[]} [args] */
 function run(hub, args = []) {
@@ -192,4 +225,55 @@ test('--help prints usage and exits 0', () => {
   const r = run(hub, ['--help'])
   assert.equal(r.status, 0)
   assert.match(r.stdout, /config-rollout — commit and push/)
+})
+
+test('a non-fast-forward push rebases by default, keeping history linear', () => {
+  const { root, remotes, hub } = workspace()
+  const { dir, bare } = repoWithRemote(join(root, 'app'), remotes, 'app')
+
+  advanceRemote(bare, 'src/other.js', 'remote work\n')
+  write(dir, '.shared/ci.yml', 'vendored v2\n')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(bareHead(bare), head(dir), 'pushed to origin')
+  assert.equal(parentCount(dir), 1, 'HEAD has one parent — replayed, no merge commit')
+  assert.ok(existsSync(join(dir, 'src/other.js')), 'remote work present')
+  assert.ok(existsSync(join(dir, '.shared/ci.yml')), 'vendored change present')
+})
+
+test('--no-rebase merges the remote instead of rebasing onto it', () => {
+  const { root, remotes, hub } = workspace()
+  const { dir, bare } = repoWithRemote(join(root, 'app'), remotes, 'app')
+
+  advanceRemote(bare, 'src/other.js', 'remote work\n')
+  write(dir, '.shared/ci.yml', 'vendored v2\n')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync', '--no-rebase'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /merge on non-fast-forward/, 'the mode is reported')
+  assert.match(r.stdout, /app: ✓ pushed/)
+  assert.equal(bareHead(bare), head(dir), 'pushed to origin')
+  assert.equal(parentCount(dir), 2, 'HEAD is a merge commit')
+  assert.ok(existsSync(join(dir, 'src/other.js')), 'remote work present')
+  assert.ok(existsSync(join(dir, '.shared/ci.yml')), 'vendored change present')
+})
+
+// The case this flag exists for: the remote landed its work through a merge
+// commit, and our vendor commit touches a path no one else did. Rebasing
+// replays across that merge; merging cannot conflict over files it never
+// touches. Both must survive with the vendored and remote work intact.
+test('--no-rebase integrates a remote whose work arrived via a merge commit', () => {
+  const { root, remotes, hub } = workspace()
+  const { dir, bare } = repoWithRemote(join(root, 'app'), remotes, 'app')
+
+  advanceRemote(bare, 'src/feature.js', 'remote feature\n', { viaMerge: true })
+  write(dir, '.shared/ci.yml', 'vendored v2\n') // disjoint from the remote's paths
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync', '--merge'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(bareHead(bare), head(dir), 'pushed to origin')
+  assert.equal(git(dir, 'status', '--porcelain'), '', 'tree clean — nothing left half-applied')
+  assert.equal(readFileSync(join(dir, 'src/feature.js'), 'utf8'), 'remote feature\n')
+  assert.equal(readFileSync(join(dir, '.shared/ci.yml'), 'utf8'), 'vendored v2\n')
 })

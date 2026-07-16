@@ -14,6 +14,7 @@ That tail is `config-rollout`.
 config-rollout -m "chore: sync shared config"   # commit + push, every repo
 config-rollout -m "..." --dry-run               # preview, write nothing
 config-rollout -m "..." --no-push               # commit locally, no push
+config-rollout -m "..." --no-rebase             # merge instead of rebase
 ```
 
 ## How it works
@@ -29,8 +30,10 @@ itself and never a `worktrees/` dir. For each repo it:
 3. Commits with `--no-verify`. Vendored files are generated, so the target
    repo's source hooks (lint, lockfile verify) add nothing here and only cost
    time.
-4. Pushes. On a non-fast-forward push it does `git pull --rebase --autostash`
-   once and retries. A rebase conflict is reported, never left half-applied.
+4. Pushes. On a non-fast-forward push it integrates the remote once and retries.
+   A conflict is reported, never left half-applied. By default it integrates
+   with `git pull --rebase --autostash`, keeping history linear; `--no-rebase`
+   merges instead — see [Rebase or merge](#rebase-or-merge).
 
 Repos run **concurrently** — each has its own `.git`, so parallel pushes are
 independent.
@@ -66,7 +69,35 @@ per run when you want to: `-m "…"` beats `rollout.message`, `--paths a,b,c` be
 | `--root <dir>` | Where the sibling repos live (default: parent of cwd). |
 | `-n, --dry-run` | Show what would happen. Write nothing. |
 | `--no-push` | Commit locally, do not push. |
+| `--no-rebase` | On a non-fast-forward push, merge the remote instead of rebasing onto it. Alias: `--merge`. |
 | `-c, --concurrency <n>` | Repos to process at once (default 8). |
+
+## Rebase or merge
+
+When a target repo's remote has moved on, the vendor commit has to be integrated
+before it can be pushed. Both ways work; they fail differently.
+
+**Rebase (default)** replays the vendor commit on top of the remote and keeps
+history linear. It is the right default for target repos with linear history.
+
+**`--no-rebase`** merges the remote in. Reach for it when the target repos have
+merge commits. A rebase replays your commit across every commit it lands on,
+including merges — and that can raise a conflict on files your vendor commit
+never touched. A merge compares three trees once, so a vendor commit that only
+touches generated paths nobody else edits cannot conflict at all.
+
+The failure is not hypothetical: a vendor commit touching a path set completely
+disjoint from the remote's still hit a rebase conflict, and merging the same two
+sides resolved with none. If your rollouts hit `rebase conflict — resolve by
+hand` on repos where nothing overlaps, this is why:
+
+```sh
+config-rollout -m "chore: sync shared config" --no-rebase
+```
+
+Either way a conflict is aborted and reported, never left half-applied.
+
+`--autostash` on a merge needs git >= 2.27.
 
 ## Run it on the host
 

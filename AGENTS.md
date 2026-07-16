@@ -29,8 +29,11 @@ bounded by `runPool()`.
 
 `rollout()` is the per-repo unit: it finds which of the declared vendored paths
 git reports dirty, stages **only those**, commits with `--no-verify`, and pushes.
-On a non-fast-forward push it does `git pull --rebase --autostash` once and
-retries; a rebase conflict is aborted and reported, never left half-applied. The
+On a non-fast-forward push it integrates the remote once and retries — `git pull
+--rebase --autostash` by default, `--no-rebase` to merge instead (safer where the
+target repos have merge commits: a rebase replays across them and can conflict on
+files the vendor commit never touched). Either way the conflict is aborted and
+reported, never left half-applied. The
 `git()` helper wraps `spawn` in a promise that **never rejects** — it returns
 `{ status, stdout, stderr }` so callers branch on `status`.
 
@@ -48,7 +51,8 @@ retries; a rebase conflict is aborted and reported, never left half-applied. The
   vendored paths — never `git add -A`, never a bare `git add .`. A target repo's
   own uncommitted changes must survive a rollout untouched.
 - **Never leave a repo half-done.** A failed push must not leave a dangling
-  rebase; abort it and report `push-failed` so a human resolves it by hand.
+  rebase or merge; abort it and report `push-failed` so a human resolves it by
+  hand.
 
 ## Conventions
 

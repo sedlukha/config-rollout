@@ -8,6 +8,7 @@
 //   config-rollout -m "chore: sync shared config"     # commit + push, all repos
 //   config-rollout -m "..." --dry-run                 # preview, write nothing
 //   config-rollout -m "..." --no-push                 # commit locally, no push
+//   config-rollout -m "..." --no-rebase               # merge instead of rebase
 //
 // It is generic: what differs between hub repos is WHICH paths they vendor and
 // the commit message they use. You declare both once, in the hub repo's
@@ -30,8 +31,13 @@
 //     cost time (they also race on .git/index.lock when driven in a loop).
 //   - It runs the repos concurrently. Each repo has its own .git, so parallel
 //     pushes are independent.
-//   - On a non-fast-forward push it does `git pull --rebase --autostash` once
-//     and retries. A rebase conflict is reported, never left half-applied.
+//   - On a non-fast-forward push it integrates the remote once and retries. A
+//     conflict is reported, never left half-applied.
+//     Default: `git pull --rebase --autostash`, which keeps history linear.
+//     `--no-rebase` merges instead. Prefer it if the target repos have merge
+//     commits: replaying a vendor commit across a merge can raise a conflict on
+//     files the commit never touched, while a merge of a disjoint path set
+//     cannot. (`--autostash` on a merge needs git >= 2.27.)
 //
 // Run it on the HOST, not inside a masking dev sandbox: a masked .env breaks
 // git stash and a read-only ~/.gitconfig breaks the push credential helper.
@@ -48,6 +54,7 @@ import { spawn } from 'node:child_process'
  * @property {string|null} root
  * @property {boolean} dryRun
  * @property {boolean} push
+ * @property {boolean} rebase
  * @property {number} concurrency
  * @property {boolean} [help]
  */
@@ -55,7 +62,7 @@ import { spawn } from 'node:child_process'
 /** @param {string[]} argv @returns {Opts} */
 function parseArgs(argv) {
   /** @type {Opts} */
-  const opts = { message: null, paths: null, root: null, dryRun: false, push: true, concurrency: 8 }
+  const opts = { message: null, paths: null, root: null, dryRun: false, push: true, rebase: true, concurrency: 8 }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '-m' || a === '--message') opts.message = argv[++i]
@@ -65,6 +72,8 @@ function parseArgs(argv) {
     } else if (a === '--root') opts.root = argv[++i]
     else if (a === '-n' || a === '--dry-run') opts.dryRun = true
     else if (a === '--no-push') opts.push = false
+    else if (a === '--rebase') opts.rebase = true
+    else if (a === '--no-rebase' || a === '--merge') opts.rebase = false
     else if (a === '-c' || a === '--concurrency') opts.concurrency = Number(argv[++i]) || 8
     else if (a === '-h' || a === '--help') opts.help = true
     else {
@@ -85,6 +94,9 @@ Options:
       --root <dir>       Where the sibling repos live (default: parent of cwd).
   -n, --dry-run          Show what would be committed/pushed. Write nothing.
       --no-push          Commit locally, do not push.
+      --no-rebase        On a non-fast-forward push, merge the remote instead
+                         of rebasing onto it. Safer where the target repos
+                         have merge commits. Alias: --merge.
   -c, --concurrency <n>  Repos to process at once (default 8).
   -h, --help             This help.
 
@@ -191,11 +203,14 @@ async function rollout(name, repo, paths, opts) {
     push = await git(['push', '-u', 'origin', 'HEAD'], repo)
   }
   if (push.status !== 0 && isNonFastForward(push)) {
-    // Remote moved on. Rebase our vendor commit on top, then retry once.
-    const pull = await git(['pull', '--rebase', '--autostash'], repo)
+    // Remote moved on. Integrate it, then retry once. Rebase replays the vendor
+    // commit on top and keeps history linear; --no-rebase merges, which cannot
+    // conflict over history the vendor commit never touched.
+    const how = opts.rebase ? 'rebase' : 'merge'
+    const pull = await git(['pull', opts.rebase ? '--rebase' : '--no-rebase', '--autostash'], repo)
     if (pull.status !== 0) {
-      await git(['rebase', '--abort'], repo) // best-effort; no-op if not rebasing
-      return { name, state: 'push-failed', head, detail: 'rebase conflict — resolve by hand' }
+      await git([how, '--abort'], repo) // best-effort; no-op if nothing in progress
+      return { name, state: 'push-failed', head, detail: `${how} conflict — resolve by hand` }
     }
     push = await git(['push'], repo)
   }
@@ -268,9 +283,11 @@ for (const entry of readdirSync(root, { withFileTypes: true })) {
 }
 
 const mode = opts.dryRun ? 'DRY RUN — nothing is written' : opts.push ? 'commit + push' : 'commit only'
+// Only worth printing when it is not the default — otherwise it is noise.
+const integration = opts.push && !opts.dryRun && !opts.rebase ? ' · merge on non-fast-forward' : ''
 console.log(`config-rollout: ${targets.length} sibling repos under ${root}`)
 console.log(`paths: ${paths.join(', ')}`)
-console.log(`mode: ${mode}\n`)
+console.log(`mode: ${mode}${integration}\n`)
 
 /** @type {RolloutResult[]} */
 const results = []
