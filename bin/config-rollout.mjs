@@ -144,11 +144,25 @@ function git(args, cwd) {
 }
 
 // Vendored paths that git reports as dirty (modified, added, or untracked).
+// Read with -z, never plain --porcelain. Plain output wraps any path that holds
+// a space in double quotes, and those quotes then travel into `git add` as part
+// of the path, which fails. -z separates records with a NUL and never quotes.
 /** @param {string} repo @param {string[]} paths @returns {Promise<string[]|null>} */
 async function vendoredChanges(repo, paths) {
-  const res = await git(['status', '--porcelain', '--', ...paths], repo)
+  const res = await git(['status', '--porcelain', '-z', '--', ...paths], repo)
   if (res.status !== 0) return null
-  return res.stdout.split('\n').filter(Boolean).map((l) => l.slice(3))
+  const fields = res.stdout.split('\0').filter(Boolean)
+  /** @type {string[]} */
+  const out = []
+  for (let i = 0; i < fields.length; i++) {
+    const record = /** @type {string} */ (fields[i])
+    out.push(record.slice(3))
+    // A rename or a copy spends one extra field on the old path. Skip it: the
+    // record only appears once the move is staged, so the index already holds
+    // both sides, and `git add` on the old path fails — it exists nowhere now.
+    if (/^[RC]|^.[RC]/.test(record.slice(0, 2))) i++
+  }
+  return out
 }
 
 /** @param {{ stdout: string, stderr: string }} res */

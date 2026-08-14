@@ -1,6 +1,6 @@
 {
   "name": "config-rollout",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Commit and push vendored config files across sibling git repos — the commit+push half of a file-vendoring sync.",
   "keywords": [
     "monorepo",

@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -225,6 +225,62 @@ test('--help prints usage and exits 0', () => {
   const r = run(hub, ['--help'])
   assert.equal(r.status, 0)
   assert.match(r.stdout, /config-rollout — commit and push/)
+})
+
+// Plain `git status --porcelain` quotes a path that holds a space, and those
+// quotes used to reach `git add` as part of the path. Every repo in the rollout
+// then failed with "pathspec ... did not match any files".
+test('stages a vendored path whose name holds a space', () => {
+  const { root, hub } = workspace()
+  const dir = initRepo(join(root, 'app'))
+  write(dir, '.shared/CI Config.yml', 'vendored v1\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-q', '-m', 'add vendored file')
+
+  write(dir, '.shared/CI Config.yml', 'vendored v2\n')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync', '--no-push'])
+  assert.equal(r.status, 0, r.stderr)
+  const files = git(dir, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean)
+  assert.deepEqual(files, ['.shared/CI Config.yml'], 'the spaced path is in the commit')
+  assert.equal(git(dir, 'status', '--porcelain'), '', 'nothing left dirty')
+})
+
+// The real trigger: the vendoring sync renamed "ADR Template.md" to
+// adr-template.md. The old file is gone from disk, the new one is untracked,
+// and the deletion line carries the quoted path.
+test('stages a rename from a spaced name to a plain one', () => {
+  const { root, hub } = workspace()
+  const dir = initRepo(join(root, 'app'))
+  write(dir, '.shared/ADR Template.md', 'body\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-q', '-m', 'add vendored file')
+
+  // What the sync does: write the new name, remove the old one.
+  write(dir, '.shared/adr-template.md', 'body\n')
+  rmSync(join(dir, '.shared/ADR Template.md'))
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync', '--no-push'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(git(dir, 'status', '--porcelain'), '', 'both sides of the move committed')
+  assert.ok(existsSync(join(dir, '.shared/adr-template.md')), 'new name on disk')
+})
+
+// A move already staged by hand before the rollout runs. Git reports it as one
+// R record with two fields, and only the new path may be handed to `git add`.
+test('an already staged rename does not break the run', () => {
+  const { root, hub } = workspace()
+  const dir = initRepo(join(root, 'app'))
+  write(dir, '.shared/ADR Template.md', 'body\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-q', '-m', 'add vendored file')
+
+  git(dir, 'mv', '.shared/ADR Template.md', '.shared/adr-template.md')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync', '--no-push'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /app: ✓ committed/)
+  assert.equal(git(dir, 'status', '--porcelain'), '', 'nothing left dirty')
 })
 
 test('a non-fast-forward push rebases by default, keeping history linear', () => {

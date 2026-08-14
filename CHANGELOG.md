@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-14
+
+### Fixed
+
+- A vendored path that holds a space no longer breaks the run. The tool read
+  `git status --porcelain`, which wraps such a path in double quotes. The quotes
+  travelled into `git add` as part of the path, so every repo failed with
+  `pathspec ... did not match any files`. It now reads `--porcelain -z`, which
+  separates records with a NUL byte and never quotes.
+- A rename that is already staged no longer breaks the run either. Such a record
+  carries the old path in an extra field, and that path exists nowhere anymore.
+  The tool now skips it and stages only the new path.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added
