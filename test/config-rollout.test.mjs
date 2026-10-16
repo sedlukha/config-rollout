@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -332,4 +332,37 @@ test('--no-rebase integrates a remote whose work arrived via a merge commit', ()
   assert.equal(git(dir, 'status', '--porcelain'), '', 'tree clean — nothing left half-applied')
   assert.equal(readFileSync(join(dir, 'src/feature.js'), 'utf8'), 'remote feature\n')
   assert.equal(readFileSync(join(dir, '.shared/ci.yml'), 'utf8'), 'vendored v2\n')
+})
+
+// An earlier run committed, then its push failed. The tree is clean now, so the
+// old check called the repo "up to date" and the commit never left.
+test('pushes a vendor commit that an earlier run left behind', () => {
+  const { root, remotes, hub } = workspace()
+  const { dir, bare } = repoWithRemote(join(root, 'app'), remotes, 'app')
+  write(dir, '.shared/ci.yml', 'vendored v2\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-q', '-m', 'chore: sync')
+
+  const dry = run(hub, ['--paths', '.shared', '-n'])
+  assert.match(dry.stdout, /app: • would push: 1 local commit/)
+  assert.notEqual(bareHead(bare), head(dir), 'dry run pushed nothing')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /app: ✓ pushed/)
+  assert.equal(bareHead(bare), head(dir), 'the old commit reached origin')
+})
+
+// The target repo's own pre-push hook runs its tests. It has nothing to say
+// about a vendored file, and when it failed the commit stayed behind.
+test('a failing pre-push hook does not stop the push', () => {
+  const { root, remotes, hub } = workspace()
+  const { dir, bare } = repoWithRemote(join(root, 'app'), remotes, 'app')
+  write(dir, '.git/hooks/pre-push', '#!/bin/sh\nexit 1\n')
+  chmodSync(join(dir, '.git/hooks/pre-push'), 0o755)
+  write(dir, '.shared/ci.yml', 'vendored v2\n')
+
+  const r = run(hub, ['--paths', '.shared', '-m', 'chore: sync'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(bareHead(bare), head(dir), 'pushed past the hook')
 })

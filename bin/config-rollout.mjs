@@ -26,9 +26,12 @@
 // Why it is safe and fast:
 //   - It stages ONLY the declared vendored paths. A developer's own
 //     work-in-progress in a target repo is never staged or committed.
-//   - It commits with --no-verify. Vendored files are generated; the target
-//     repo's source hooks (lint, lockfile verify) add nothing here and only
-//     cost time (they also race on .git/index.lock when driven in a loop).
+//   - It commits and pushes with --no-verify. Vendored files are generated; the
+//     target repo's source hooks (lint, lockfile verify, tests) add nothing here
+//     and only cost time (they also race on .git/index.lock when driven in a loop).
+//   - It also pushes a repo whose tree is clean but whose branch is ahead of
+//     its upstream: a push that failed on an earlier run leaves that state.
+//     A push sends every local commit, not only the vendor ones.
 //   - It runs the repos concurrently. Each repo has its own .git, so parallel
 //     pushes are independent.
 //   - On a non-fast-forward push it integrates the remote once and retries. A
@@ -165,6 +168,16 @@ async function vendoredChanges(repo, paths) {
   return out
 }
 
+// Local commits the remote does not have yet. A push that failed on an earlier
+// run leaves its vendor commit behind, and the tree is clean after it. Without
+// this check the next run calls the repo "up to date" and never pushes it.
+// A branch with no upstream has nothing to compare, so it counts as 0.
+/** @param {string} repo @returns {Promise<number>} */
+async function unpushedCommits(repo) {
+  const res = await git(['rev-list', '--count', '@{u}..HEAD'], repo)
+  return res.status === 0 ? Number(res.stdout.trim()) : 0
+}
+
 /** @param {{ stdout: string, stderr: string }} res */
 function isNonFastForward(res) {
   const s = `${res.stderr}\n${res.stdout}`
@@ -179,7 +192,7 @@ function isNoUpstream(res) {
 /**
  * @typedef {Object} RolloutResult
  * @property {string} name
- * @property {'clean'|'would-commit'|'committed'|'pushed'|'push-failed'|'error'} state
+ * @property {'clean'|'would-commit'|'would-push'|'committed'|'pushed'|'push-failed'|'error'} state
  * @property {string} [detail]
  * @property {string[]} [paths]
  * @property {string} [head]
@@ -195,26 +208,36 @@ function isNoUpstream(res) {
 async function rollout(name, repo, paths, opts) {
   const dirty = await vendoredChanges(repo, paths)
   if (dirty === null) return { name, state: 'error', detail: 'git status failed' }
-  if (dirty.length === 0) return { name, state: 'clean' }
+  const ahead = await unpushedCommits(repo)
+  if (dirty.length === 0 && ahead === 0) return { name, state: 'clean' }
 
-  if (opts.dryRun) return { name, state: 'would-commit', paths: dirty }
+  if (opts.dryRun) {
+    if (dirty.length) return { name, state: 'would-commit', paths: dirty }
+    return { name, state: 'would-push', detail: `${ahead} local commit(s)` }
+  }
 
-  const add = await git(['add', '--', ...dirty], repo)
-  if (add.status !== 0) return { name, state: 'error', detail: `git add: ${add.stderr.trim()}` }
+  if (dirty.length) {
+    const add = await git(['add', '--', ...dirty], repo)
+    if (add.status !== 0) return { name, state: 'error', detail: `git add: ${add.stderr.trim()}` }
 
-  // Nothing actually staged (e.g. a pure mode flip git ignores) — treat as clean.
-  const staged = await git(['diff', '--cached', '--quiet'], repo)
-  if (staged.status === 0) return { name, state: 'clean' }
-
-  const commit = await git(['commit', '--no-verify', '-m', /** @type {string} */ (opts.message)], repo)
-  if (commit.status !== 0) return { name, state: 'error', detail: `git commit: ${commit.stderr.trim()}` }
+    // Nothing actually staged (e.g. a pure mode flip git ignores). With no
+    // earlier commit to push either, the repo is clean.
+    const staged = await git(['diff', '--cached', '--quiet'], repo)
+    if (staged.status !== 0) {
+      const commit = await git(['commit', '--no-verify', '-m', /** @type {string} */ (opts.message)], repo)
+      if (commit.status !== 0) return { name, state: 'error', detail: `git commit: ${commit.stderr.trim()}` }
+    } else if (ahead === 0) return { name, state: 'clean' }
+  }
   const head = (await git(['rev-parse', '--short', 'HEAD'], repo)).stdout.trim()
 
   if (!opts.push) return { name, state: 'committed', paths: dirty, head }
 
-  let push = await git(['push'], repo)
+  // --no-verify for the same reason as the commit: a pre-push hook runs the
+  // repo's own tests, which a vendored file does not need. A failing or slow
+  // hook used to leave the commit behind, unpushed.
+  let push = await git(['push', '--no-verify'], repo)
   if (push.status !== 0 && isNoUpstream(push)) {
-    push = await git(['push', '-u', 'origin', 'HEAD'], repo)
+    push = await git(['push', '--no-verify', '-u', 'origin', 'HEAD'], repo)
   }
   if (push.status !== 0 && isNonFastForward(push)) {
     // Remote moved on. Integrate it, then retry once. Rebase replays the vendor
@@ -226,7 +249,7 @@ async function rollout(name, repo, paths, opts) {
       await git([how, '--abort'], repo) // best-effort; no-op if nothing in progress
       return { name, state: 'push-failed', head, detail: `${how} conflict — resolve by hand` }
     }
-    push = await git(['push'], repo)
+    push = await git(['push', '--no-verify'], repo)
   }
   if (push.status !== 0) {
     return { name, state: 'push-failed', head, detail: push.stderr.trim().split('\n').pop() }
@@ -311,6 +334,7 @@ await runPool(targets, opts.concurrency, ({ name, repo }) => rollout(name, repo,
     pushed: `✓ pushed   ${r.head}`,
     committed: `✓ committed ${r.head} (not pushed)`,
     'would-commit': `• would commit: ${r.paths?.join(', ')}`,
+    'would-push': `• would push: ${r.detail}`,
     clean: '· up to date',
     'push-failed': `✗ push FAILED (${r.detail})`,
     error: `✗ error (${r.detail})`,
@@ -324,12 +348,14 @@ const by = (/** @type {RolloutResult['state']} */ s) =>
 const pushed = by('pushed')
 const committed = by('committed')
 const would = by('would-commit')
+const wouldPush = by('would-push')
 const clean = by('clean')
 const failed = results.filter((r) => r.state === 'push-failed' || r.state === 'error')
 
 console.log('')
 if (opts.dryRun) {
   console.log(`Would commit: ${would.join(', ') || 'none'}`)
+  if (wouldPush.length) console.log(`Would push:   ${wouldPush.join(', ')}`)
   console.log(`Up to date:   ${clean.join(', ') || 'none'}`)
 } else {
   if (pushed.length) console.log(`Pushed:    ${pushed.join(', ')}`)

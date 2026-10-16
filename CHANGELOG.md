@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-16
+
+### Fixed
+
+- A commit left behind by a failed push is now pushed on the next run. The
+  tool looked only at dirty files. After a failed push the tree is clean, so
+  every later run said "up to date", and the commits piled up unpushed. Now a
+  clean repo whose branch is ahead of its upstream is pushed too. The push
+  sends every local commit, as it always did.
+- `--dry-run` reports such a repo as `would push: N local commit(s)`.
+
+### Changed
+
+- The push runs with `--no-verify`, like the commit. A target repo's pre-push
+  hook runs its own tests, which a vendored file does not need. A slow or
+  failing hook used to stop the push and leave the commit behind.
+
 ## [0.2.1] - 2026-08-14
 
 ### Fixed

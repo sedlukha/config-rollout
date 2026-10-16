@@ -28,7 +28,9 @@ parent of cwd), and processes each git repo through `rollout()` — concurrently
 bounded by `runPool()`.
 
 `rollout()` is the per-repo unit: it finds which of the declared vendored paths
-git reports dirty, stages **only those**, commits with `--no-verify`, and pushes.
+git reports dirty, stages **only those**, commits with `--no-verify`, and pushes
+with `--no-verify`. A clean repo whose branch is ahead of its upstream is pushed
+too: an earlier failed push leaves that state.
 On a non-fast-forward push it integrates the remote once and retries — `git pull
 --rebase --autostash` by default, `--no-rebase` to merge instead (safer where the
 target repos have merge commits: a rebase replays across them and can conflict on
@@ -82,5 +84,6 @@ node --test        # or: npm test
 Tests live in `test/`. They cover: a dirty vendored path committed (and pushed
 to a bare remote), a repo's own work-in-progress left unstaged, a clean repo
 skipped, `--dry-run` writing nothing, `--no-push` committing locally, the hub
-repo and `worktrees/` excluded, and defaults read from the hub's
-`package.json`. Add a case here when you change behaviour.
+repo and `worktrees/` excluded, defaults read from the hub's `package.json`, a
+commit left by an earlier failed push pushed on the next run, and a failing
+pre-push hook skipped. Add a case here when you change behaviour.

@@ -23,14 +23,17 @@ Run it from the **hub repo's root**, right after your vendoring sync. It targets
 every sibling git repo (the directories next to the hub repo), never the hub repo
 itself and never a `worktrees/` dir. For each repo it:
 
-1. Finds which **declared vendored paths** are dirty. If none, the repo is
-   skipped.
+1. Finds which **declared vendored paths** are dirty. If none, and the branch
+   is not ahead of its upstream, the repo is skipped. A branch that is ahead
+   still gets pushed: a push that failed on an earlier run leaves it so. The
+   push sends every local commit, not only the vendor ones.
 2. Stages **only those paths** — a developer's own work-in-progress is never
    staged or committed.
 3. Commits with `--no-verify`. Vendored files are generated, so the target
    repo's source hooks (lint, lockfile verify) add nothing here and only cost
    time.
-4. Pushes. On a non-fast-forward push it integrates the remote once and retries.
+4. Pushes, also with `--no-verify`, so a slow or failing pre-push hook cannot
+   leave the commit behind. On a non-fast-forward push it integrates the remote once and retries.
    A conflict is reported, never left half-applied. By default it integrates
    with `git pull --rebase --autostash`, keeping history linear; `--no-rebase`
    merges instead — see [Rebase or merge](#rebase-or-merge).
